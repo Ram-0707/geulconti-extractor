@@ -1,0 +1,5 @@
+# 작업용 파일
+*.tmp
+~$*.docx
+.DS_Store
+Thumbs.db
