@@ -386,10 +386,39 @@ function looksLikeSpeaker(s){
   const t=s.replace(/\([^)]*\)/g,'').replace(/[\[\]]/g,'').trim();
   return t.length>0 && t.length<=12 && !/[.!?~…]$/.test(t);
 }
+// 대사 칸 전체가 따옴표 하나로 감싸여 있을 때만 바깥 따옴표를 뗍니다.
+//   "아네트… 미안해…"            → 아네트… 미안해…
+//   론도리스에서는 '카리소' 세…   → 그대로 (따옴표가 일부만 감싸므로)
+function unwrapWholeQuote(s){
+  const t=s.trim();
+  if(t.length<2) return t;
+  const spans=scanBracket(t).concat(scanSym(t,DQ)).concat(scanSym(t,SQ));
+  for(let i=0;i<spans.length;i++){
+    if(spans[i].s===0 && spans[i].e===t.length-1) return spans[i].t;
+  }
+  return t;
+}
 function extract(line,o){
   const raw=line.replace(/ /g,' ').replace(/[ \t]+$/,'');
   if(!raw.trim()) return {text:'',speaker:''};
 
+  // 화자명과 대사가 탭(표 칸 포함)으로 나뉜 줄은 대사 칸을 통째로 씁니다.
+  // 안에 든 따옴표는 대사의 일부이므로 건드리지 않습니다.
+  if(o.tab && raw.indexOf('\t')>=0){
+    const filled=raw.split('\t').map(function(s){return s.trim();}).filter(Boolean);
+    if(filled.length>=2){
+      const speaker=filled[filled.length-2];
+      return {text:unwrapWholeQuote(filled[filled.length-1]),
+              speaker:looksLikeSpeaker(speaker)?speaker:''};
+    }
+    return {text:'',speaker:''};
+  }
+  // 두 칸 이상 띄어쓰기로 정렬한 콘티도 같은 취급입니다.
+  if(o.space){
+    const m=raw.match(/^\s*(\S[^\s]{0,18})\s{2,}(\S[\s\S]*)$/);
+    if(m && looksLikeSpeaker(m[1])) return {text:unwrapWholeQuote(m[2]),speaker:m[1]};
+  }
+  // 화자 칸이 없는 서술·지문 줄에서만 따옴표 안을 대사로 봅니다.
   if(o.quote){
     const q=pullQuotes(raw);
     if(q.length){
@@ -398,22 +427,10 @@ function extract(line,o){
       const head=at>0?raw.slice(0,at).trim():'';
       if(head){
         const w=head.split(/[\s\t]+/).filter(Boolean);
-        if(w.length) sp=w[w.length-1];
+        if(w.length) sp=w[w.length-1].replace(/[,，·]+$/,'');
       }
       return {text:q.join(' '),speaker:sp};
     }
-  }
-  if(o.tab && raw.indexOf('\t')>=0){
-    const filled=raw.split('\t').map(function(s){return s.trim();}).filter(Boolean);
-    if(filled.length>=2){
-      const speaker=filled[filled.length-2], bodyText=filled[filled.length-1];
-      return {text:bodyText,speaker:looksLikeSpeaker(speaker)?speaker:''};
-    }
-    return {text:'',speaker:''};
-  }
-  if(o.space){
-    const m=raw.match(/^\s*(\S[^\s]{0,18})\s{2,}(\S[\s\S]*)$/);
-    if(m && looksLikeSpeaker(m[1])) return {text:m[2].trim(),speaker:m[1]};
   }
   return {text:'',speaker:''};
 }
