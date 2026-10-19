@@ -252,18 +252,22 @@ const W='http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 function attrW(el,name){
   return el.getAttributeNS(W,name) || el.getAttribute('w:'+name) || el.getAttribute(name) || '';
 }
-// 문단의 왼쪽 들여쓰기(트윕 단위, 1인치=1440). 직접 지정값이 없으면 문단 스타일에서 물려받습니다.
+// <w:ind> 의 들여쓰기 값(트윕 단위, 1인치=1440).
+// 한국어 워드는 글자 단위(leftChars 등, 1/100글자)로만 적는 경우가 있어
+// 1글자 ≈ 200트윕(10pt 기준)으로 환산합니다.
+function indVal(ind){
+  function n(a){ return parseInt(attrW(ind,a),10)||0; }
+  const left =n('left')||n('start')||n('leftChars')*2||n('startChars')*2;
+  const first=n('firstLine')||n('firstLineChars')*2;
+  const hang =n('hanging')||n('hangingChars')*2;
+  return {set:!!(left||first||hang), v:Math.max(0,left+first-hang)};
+}
+// 문단의 왼쪽 들여쓰기. 직접 지정값이 없으면 문단 스타일에서 물려받습니다.
 function indentOf(p,styleInd){
   const pPr=childrenNamed(p,'pPr')[0];
   if(!pPr) return 0;
   const ind=childrenNamed(pPr,'ind')[0];
-  if(ind){
-    const left=parseInt(attrW(ind,'left')||attrW(ind,'start'),10)||0;
-    const first=parseInt(attrW(ind,'firstLine'),10)||0;
-    const hang=parseInt(attrW(ind,'hanging'),10)||0;
-    const v=left+first-hang;
-    if(left||first||hang) return v>0?v:0;
-  }
+  if(ind){ const r=indVal(ind); if(r.set) return r.v; }
   const st=childrenNamed(pPr,'pStyle')[0];
   const id=st?attrW(st,'val'):'';
   return (id && styleInd[id])||0;
@@ -281,12 +285,7 @@ function styleIndents(xml){
     const b=childrenNamed(st,'basedOn')[0];
     if(b) based[id]=attrW(b,'val');
     const ind=pPr?childrenNamed(pPr,'ind')[0]:null;
-    if(ind){
-      const v=(parseInt(attrW(ind,'left')||attrW(ind,'start'),10)||0)
-             +(parseInt(attrW(ind,'firstLine'),10)||0)
-             -(parseInt(attrW(ind,'hanging'),10)||0);
-      map[id]=v>0?v:0;
-    }
+    if(ind) map[id]=indVal(ind).v;
   });
   Object.keys(based).forEach(function(id){           // 상속 해결 (순환 방지용 깊이 제한)
     let cur=id,depth=0;
@@ -306,14 +305,15 @@ function docLines(xml,stylesXml){
     if(n.localName==='p'){
       const ind=indentOf(n,styleInd);
       // 한 문단 안의 줄바꿈(Shift+Enter)으로 생긴 뒷줄은 앞 대사의 이어짐으로 표시합니다.
-      paraText(n).split('\n').forEach(function(t,i){out.push({src:t,indent:ind,cont:i>0});});
+      paraText(n).split('\n').forEach(function(t,i){out.push({src:t,indent:ind,cont:i>0,table:false});});
     }else if(n.localName==='tbl'){
       childrenNamed(n,'tr').forEach(function(tr){
         const cells=childrenNamed(tr,'tc').map(function(tc){
           return Array.prototype.filter.call(tc.getElementsByTagName('*'),function(x){return x.localName==='p';})
             .map(paraText).join(' ').replace(/\s+/g,' ').trim();
         });
-        out.push({src:cells.join('\t'),indent:0,cont:false});
+        // 표 행은 첫 칸이 비면 탭으로 시작하지만 들여쓰기가 아니므로 표시해 둡니다
+        out.push({src:cells.join('\t'),indent:0,cont:false,table:true});
       });
     }
   });
@@ -409,14 +409,14 @@ function extract(line,o){
     if(filled.length>=2){
       const speaker=filled[filled.length-2];
       return {text:unwrapWholeQuote(filled[filled.length-1]),
-              speaker:looksLikeSpeaker(speaker)?speaker:''};
+              speaker:looksLikeSpeaker(speaker)?speaker:'',via:'tab'};
     }
     return {text:'',speaker:''};
   }
   // 두 칸 이상 띄어쓰기로 정렬한 콘티도 같은 취급입니다.
   if(o.space){
     const m=raw.match(/^\s*(\S[^\s]{0,18})\s{2,}(\S[\s\S]*)$/);
-    if(m && looksLikeSpeaker(m[1])) return {text:unwrapWholeQuote(m[2]),speaker:m[1]};
+    if(m && looksLikeSpeaker(m[1])) return {text:unwrapWholeQuote(m[2]),speaker:m[1],via:'space'};
   }
   // 화자 칸이 없는 서술·지문 줄에서만 따옴표 안을 대사로 봅니다.
   if(o.quote){
@@ -429,7 +429,7 @@ function extract(line,o){
         const w=head.split(/[\s\t]+/).filter(Boolean);
         if(w.length) sp=w[w.length-1].replace(/[,，·]+$/,'');
       }
-      return {text:q.join(' '),speaker:sp};
+      return {text:q.join(' '),speaker:sp,via:'quote'};
     }
   }
   return {text:'',speaker:''};
@@ -453,6 +453,15 @@ function opts(){return{
 
 const INDENT_MIN=100;   // 트윕(1인치=1440). 이보다 들여쓰였으면 이어지는 대사로 봅니다.
 
+// 워드에서 같은 모양의 들여쓰기를 만드는 방법은 여러 가지라 모두 봅니다.
+//   ① 문단 들여쓰기 설정(w:ind, 글자 단위 포함, 스타일 상속 포함) → L.indent
+//   ② 줄 앞에 탭 문자를 친 경우            ⇥⇥오늘 당장…
+//   ③ 줄 앞에 전각 공백·여러 칸 공백을 친 경우  　　또 보자.
+const LEAD_WS=/^(?:[\t　 ]| {2,})/;
+function isIndented(L){
+  return L.indent>=INDENT_MIN || (!L.table && LEAD_WS.test(L.src));
+}
+
 function recompute(){
   const o=opts();
   files.forEach(function(f){
@@ -461,23 +470,26 @@ function recompute(){
       const r=extract(L.src,o);
       L.speaker=r.speaker;
       L.text=polish(r.text,o);
+      L.via=r.via||'';
       L.on=!!L.text;
       L.contOf=false;
     });
     // 대사 바로 뒤에 오는 "이어지는 줄" 잇기.
-    // 워드 들여쓰기가 있거나, 한 문단 안의 줄바꿈(Shift+Enter)으로 생긴 줄이 해당합니다.
-    let prevDialogue=false;
+    //  · 들여쓴 줄은 화자 칸이 있는 대사 줄(서윤(속) ⇥ …) 뒤에서만 잇습니다.
+    //    서술 줄 속 따옴표에서 뽑은 대사(… “앗…!” 놀라는 아네트.) 뒤의 들여쓴 줄은 지문일 수 있어서요.
+    //  · 한 문단 안의 줄바꿈(Shift+Enter)으로 생긴 줄은 어느 쪽이든 잇습니다.
+    let chain=null;   // null | 'speaker' | 'quote'
     f.lines.forEach(function(L){
-      if(!L.src.trim()){ prevDialogue=false; return; }   // 빈 줄에서 끊깁니다
-      if(L.text.trim()){ prevDialogue=true; return; }
-      if(L.edited) return;
-      if(prevDialogue && o.indent && (L.cont || L.indent>=INDENT_MIN)){
+      if(!L.src.trim()){ chain=null; return; }   // 빈 줄에서 끊깁니다
+      if(L.text.trim()){ chain=(!L.edited && L.via==='quote')?'quote':'speaker'; return; }
+      if(L.edited){ chain=null; return; }
+      if(o.indent && chain && (L.cont || (chain==='speaker' && isIndented(L)))){
         // 줄 끝에 걸친 따옴표 조각("…날이야!")은 떼고 줄 전체를 대사로 씁니다
         L.text=polish(stripEdgeQuotes(L.src.replace(/\t/g,' ')),o);
         L.speaker=''; L.contOf=true; L.on=!!L.text;
-        prevDialogue=!!L.text;
+        if(!L.text) chain=null;
       }else{
-        prevDialogue=false;
+        chain=null;
       }
     });
   });
@@ -591,7 +603,7 @@ async function load(fileList){
       if(!xml){ toast(f.name+': 워드 문서가 아닌 것 같습니다.'); continue; }
       const styles=await zip.text('word/styles.xml');
       next.push({name:f.name,lines:docLines(xml,styles).map(function(d){
-        return {src:d.src,indent:d.indent,cont:d.cont,
+        return {src:d.src,indent:d.indent,cont:d.cont,table:d.table,
                 text:'',speaker:'',on:false,edited:false,contOf:false};
       })});
     }catch(e){ toast(f.name+' 읽기 실패: '+e.message); }
@@ -605,9 +617,9 @@ function loadText(text){
   // 한 대사가 두 줄로 쪼개지지 않도록 띄어쓰기로 이어 붙입니다.
   const lines=text.replace(new RegExp(String.fromCharCode(11),'g'),' ').split(/\r\n|\r|\n/);
   if(!lines.some(function(s){return s.trim();})){ toast('붙여넣은 글이 비어 있습니다.'); return; }
-  // 붙여넣기에서는 워드의 들여쓰기 설정이 사라지므로, 줄 앞의 탭·공백만이 단서입니다.
+  // 붙여넣기에서는 워드의 들여쓰기 설정이 사라지므로, 줄 앞의 탭·공백만이 단서입니다(isIndented).
   files=[{name:'붙여넣은 글',lines:lines.map(function(s){
-    return {src:s,indent:/^(\t| {2,})/.test(s)?720:0,cont:false,
+    return {src:s,indent:0,cont:false,table:false,
             text:'',speaker:'',on:false,edited:false,contOf:false};
   })}];
   recompute();
